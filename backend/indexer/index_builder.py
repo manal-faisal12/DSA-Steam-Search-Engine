@@ -6,8 +6,9 @@ Creates:
 1. Lexicon: word -> term ID
 2. Forward index: document -> terms and positions
 3. Inverted index: term -> documents and frequencies
-4. Barrels: smaller files containing groups of inverted-index terms
-5. Document storage and document-length statistics
+4. Barrels: JSONL files containing term postings
+5. Offset tables: term ID -> byte position in barrel
+6. Document storage and statistics
 """
 
 import argparse
@@ -18,9 +19,7 @@ from pathlib import Path
 from backend.tokenizer.tokenizer import tokenize
 
 
-# Project root: the folder containing backend/
 ROOT = Path(__file__).resolve().parents[2]
-
 DEFAULT_DATA = ROOT / "data" / "test" / "games_test.jsonl"
 INDEX_DIR = ROOT / "data" / "index"
 
@@ -49,11 +48,7 @@ def get_searchable_text(game):
     ]
 
     for field in [
-        "genres",
-        "tags",
-        "categories",
-        "developers",
-        "publishers",
+        "genres", "tags", "categories", "developers", "publishers"
     ]:
         value = game.get(field, [])
 
@@ -63,6 +58,44 @@ def get_searchable_text(game):
             fields.append(str(value))
 
     return " ".join(str(value) for value in fields if value)
+
+
+def write_barrel(barrel_dir, barrel_number, term_postings):
+    """
+    Write one JSONL barrel and its byte-offset table.
+
+    Each line contains one term ID and its postings.
+    Offsets are measured in bytes, not characters.
+    """
+    barrel_dir = Path(barrel_dir)
+    barrel_dir.mkdir(parents=True, exist_ok=True)
+
+    barrel_path = barrel_dir / f"barrel_{barrel_number}.jsonl"
+    offset_path = barrel_dir / f"offsets_{barrel_number}.json"
+
+    offsets = {}
+
+    with open(barrel_path, "wb") as file:
+        for term_id in sorted(term_postings, key=int):
+            offsets[str(term_id)] = file.tell()
+
+            record = {
+                "term_id": int(term_id),
+                "postings": term_postings[term_id],
+            }
+
+            line = (
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8") + b"\n"
+            )
+
+            file.write(line)
+
+    with open(offset_path, "w", encoding="utf-8") as file:
+        json.dump(offsets, file, indent=4)
 
 
 def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
@@ -79,9 +112,14 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
     barrel_dir = index_dir / "barrels"
     barrel_dir.mkdir(parents=True, exist_ok=True)
 
-    # Remove old barrel files so previous builds do not leave stale data.
-    for old_file in barrel_dir.glob("barrel_*.json"):
-        old_file.unlink()
+    # Remove old barrel and offset files.
+    for pattern in [
+        "barrel_*.json",
+        "barrel_*.jsonl",
+        "offsets_*.json",
+    ]:
+        for old_file in barrel_dir.glob(pattern):
+            old_file.unlink()
 
     lexicon = {}
     inverted = defaultdict(list)
@@ -95,13 +133,10 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
 
     for doc_id, game in enumerate(read_jsonl(data_path)):
         searchable_text = get_searchable_text(game)
-
-        # Use the same tokenizer as the rest of the project.
         words = tokenize(searchable_text, remove_stopwords=True)
 
         term_data = defaultdict(list)
 
-        # Record every term's positions in this document.
         for position, word in enumerate(words):
             if word not in lexicon:
                 lexicon[word] = next_term_id
@@ -109,7 +144,6 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
 
             term_data[word].append(position)
 
-        # Forward index: document -> term IDs and positions.
         forward_terms = []
 
         for word, positions in term_data.items():
@@ -122,7 +156,6 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
                 "positions": positions,
             })
 
-            # Inverted index: term -> document and frequency.
             inverted[word].append([doc_id, frequency])
 
         forward_records.append({
@@ -130,7 +163,6 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
             "terms": forward_terms,
         })
 
-        # Keep the original game information for search results.
         documents.append({
             "doc_id": doc_id,
             "game": game,
@@ -155,7 +187,7 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
         for record in forward_records:
             file.write(json.dumps(record) + "\n")
 
-    # Split the inverted index into barrels.
+    # Group inverted-index terms into barrels.
     barrels = defaultdict(dict)
 
     for word, postings in inverted.items():
@@ -164,13 +196,10 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
 
         barrels[barrel_number][str(term_id)] = postings
 
-    for barrel_number, barrel_data in barrels.items():
-        barrel_path = barrel_dir / f"barrel_{barrel_number}.json"
+    # Write each barrel and its offset table.
+    for barrel_number, term_postings in barrels.items():
+        write_barrel(barrel_dir, barrel_number, term_postings)
 
-        with open(barrel_path, "w", encoding="utf-8") as file:
-            json.dump(barrel_data, file)
-
-    # Save document lengths and basic collection statistics.
     average_length = (
         sum(document_lengths) / len(document_lengths)
         if document_lengths else 0
@@ -217,4 +246,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

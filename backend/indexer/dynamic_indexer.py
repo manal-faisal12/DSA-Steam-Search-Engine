@@ -2,18 +2,8 @@
 """
 Dynamic Indexer for Steam Game Search Engine.
 
-Adds new games to an existing file-based index without rebuilding
-the entire dataset.
-
-Supports:
-- Adding a game from a Python dictionary.
-- Adding a game from a JSON file.
-- Adding plain-text content.
-- Updating the lexicon.
-- Updating the forward index.
-- Updating inverted-index barrels.
-- Updating document statistics.
-- Preventing duplicate game IDs.
+Adds new games to an existing file-based index.
+Updates JSONL barrel files and their byte-offset tables.
 """
 
 import json
@@ -22,7 +12,10 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
-from backend.indexer.index_builder import get_searchable_text
+from backend.indexer.index_builder import (
+    get_searchable_text,
+    write_barrel,
+)
 from backend.tokenizer.tokenizer import tokenize
 
 
@@ -91,6 +84,30 @@ class DynamicIndexer:
                 "Index not found. Build the initial index first."
             )
 
+    def _load_barrel(self, barrel_number):
+        """Load all term postings from one JSONL barrel."""
+        barrel_path = (
+            self.barrel_dir / f"barrel_{barrel_number}.jsonl"
+        )
+
+        term_postings = {}
+
+        if not barrel_path.exists():
+            return term_postings
+
+        with open(barrel_path, "r", encoding="utf-8") as file:
+            for line in file:
+                if not line.strip():
+                    continue
+
+                record = json.loads(line)
+
+                term_postings[str(record["term_id"])] = (
+                    record["postings"]
+                )
+
+        return term_postings
+
     def add_game(self, game):
         """
         Add one game dictionary to the existing index.
@@ -110,7 +127,6 @@ class DynamicIndexer:
         forward_path = self.index_dir / "forward_index.jsonl"
         lengths_path = self.index_dir / "doc_lengths.json"
 
-        # Load existing index data.
         with open(lexicon_path, encoding="utf-8") as file:
             lexicon = json.load(file)
 
@@ -134,7 +150,7 @@ class DynamicIndexer:
         with open(lengths_path, encoding="utf-8") as file:
             document_lengths = json.load(file)
 
-        # Check for duplicate external game IDs.
+        # Reject duplicate external game IDs.
         for record in documents:
             existing_game = record.get("game", {})
 
@@ -143,21 +159,16 @@ class DynamicIndexer:
                     f"Game ID {game['id']} already exists."
                 )
 
-        # Assign the next internal document ID.
         doc_id = stats["num_docs"]
 
-        # Tokenize the searchable game information.
-        searchable_text = get_searchable_text(game)
-
         words = tokenize(
-            searchable_text,
+            get_searchable_text(game),
             remove_stopwords=True,
         )
 
         if not words:
             raise ValueError("Game contains no searchable words.")
 
-        # Store the positions of every word.
         term_positions = defaultdict(list)
 
         next_term_id = max(
@@ -166,19 +177,18 @@ class DynamicIndexer:
         ) + 1
 
         for position, word in enumerate(words):
-
             if word not in lexicon:
                 lexicon[word] = next_term_id
                 next_term_id += 1
 
             term_positions[word].append(position)
 
-        # Prepare the forward-index entry.
         forward_terms = []
 
-        # Update the appropriate inverted-index barrels.
-        for word, positions in term_positions.items():
+        # Group updates by barrel so each barrel is rewritten once.
+        updated_barrels = defaultdict(dict)
 
+        for word, positions in term_positions.items():
             term_id = int(lexicon[word])
             frequency = len(positions)
 
@@ -192,41 +202,39 @@ class DynamicIndexer:
                 (term_id - 1) // stats["terms_per_barrel"]
             )
 
-            barrel_path = (
-                self.barrel_dir
-                / f"barrel_{barrel_number}.json"
-            )
-
-            if barrel_path.exists():
-                with open(barrel_path, encoding="utf-8") as file:
-                    barrel_data = json.load(file)
-            else:
-                barrel_data = {}
+            if barrel_number not in updated_barrels:
+                updated_barrels[barrel_number] = self._load_barrel(
+                    barrel_number
+                )
 
             term_key = str(term_id)
 
-            postings = barrel_data.setdefault(term_key, [])
+            postings = updated_barrels[barrel_number].setdefault(
+                term_key, []
+            )
 
             postings.append([doc_id, frequency])
 
-            atomic_write_json(barrel_path, barrel_data)
+        # Write updated barrels and regenerate their offset tables.
+        for barrel_number, term_postings in updated_barrels.items():
+            write_barrel(
+                self.barrel_dir,
+                barrel_number,
+                term_postings,
+            )
 
-        # Add the document to the forward index.
         forward_records.append({
             "doc_id": doc_id,
             "terms": forward_terms,
         })
 
-        # Preserve the original game information.
         documents.append({
             "doc_id": doc_id,
             "game": game,
         })
 
-        # Store document length.
         document_lengths.append(len(words))
 
-        # Update collection statistics.
         stats["num_docs"] = len(documents)
         stats["num_terms"] = len(lexicon)
 
@@ -235,40 +243,26 @@ class DynamicIndexer:
         )
 
         stats["num_barrels"] = len(
-            list(self.barrel_dir.glob("barrel_*.json"))
+            list(self.barrel_dir.glob("barrel_*.jsonl"))
         )
 
-        # Save updated index files.
+        # Save updated collection data.
         atomic_write_json(lexicon_path, lexicon)
 
-        atomic_write_jsonl(
-            documents_path,
-            documents,
-        )
+        atomic_write_jsonl(documents_path, documents)
 
-        atomic_write_jsonl(
-            forward_path,
-            forward_records,
-        )
+        atomic_write_jsonl(forward_path, forward_records)
 
-        atomic_write_json(
-            lengths_path,
-            document_lengths,
-        )
+        atomic_write_json(lengths_path, document_lengths)
 
-        atomic_write_json(
-            stats_path,
-            stats,
-        )
+        atomic_write_json(stats_path, stats)
 
         return doc_id
 
     def add_json_file(self, json_path):
         """Add one game stored in a JSON file."""
-
         json_path = Path(json_path)
 
-        # utf-8-sig supports normal UTF-8 and UTF-8 files with a BOM.
         with open(json_path, encoding="utf-8-sig") as file:
             game = json.load(file)
 

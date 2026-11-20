@@ -1,7 +1,9 @@
 
 """
-Reads the Steam Game Search indexes and provides BM25 search.
-Supports refreshing after dynamic content additions.
+Reads Steam Game Search indexes and provides BM25 search.
+
+Uses byte-offset tables to retrieve individual term postings
+without loading entire barrel files into memory.
 """
 
 import json
@@ -16,56 +18,90 @@ INDEX_DIR = ROOT / "data" / "index"
 
 
 class BarrelStore:
-    """Loads inverted-index barrels on demand."""
+    """Retrieves individual term postings using byte offsets."""
 
     def __init__(self, index_dir=INDEX_DIR):
         self.index_dir = Path(index_dir)
         self.cache = {}
+        self.offset_cache = {}
         self.refresh()
 
     def refresh(self):
-        """Reload lexicon and statistics and clear cached barrels."""
+        """Reload lexicon and statistics and clear caches."""
 
-        with open(
-            self.index_dir / "lexicon.json",
-            encoding="utf-8",
-        ) as file:
+        with open(self.index_dir / "lexicon.json", encoding="utf-8") as file:
             self.lexicon = json.load(file)
 
-        with open(
-            self.index_dir / "stats.json",
-            encoding="utf-8",
-        ) as file:
+        with open(self.index_dir / "stats.json", encoding="utf-8") as file:
             self.stats = json.load(file)
 
         self.cache.clear()
+        self.offset_cache.clear()
 
     def get_postings(self, word):
-        """Return [(doc_id, term_frequency), ...]."""
+        """Return [(doc_id, term_frequency), ...] for a word."""
 
         term_id = self.lexicon.get(word)
 
         if term_id is None:
             return []
 
+        term_id = int(term_id)
+
         barrel_number = (
-            (int(term_id) - 1) // self.stats["terms_per_barrel"]
+            (term_id - 1) // self.stats["terms_per_barrel"]
         )
 
-        if barrel_number not in self.cache:
+        # Cache offset tables separately from postings.
+        if barrel_number not in self.offset_cache:
+            offset_path = (
+                self.index_dir
+                / "barrels"
+                / f"offsets_{barrel_number}.json"
+            )
+
+            if not offset_path.exists():
+                return []
+
+            with open(offset_path, encoding="utf-8") as file:
+                self.offset_cache[barrel_number] = json.load(file)
+
+        offsets = self.offset_cache[barrel_number]
+        offset = offsets.get(str(term_id))
+
+        if offset is None:
+            return []
+
+        cache_key = (barrel_number, term_id)
+
+        if cache_key not in self.cache:
             barrel_path = (
                 self.index_dir
                 / "barrels"
-                / f"barrel_{barrel_number}.json"
+                / f"barrel_{barrel_number}.jsonl"
             )
 
             if not barrel_path.exists():
                 return []
 
-            with open(barrel_path, encoding="utf-8") as file:
-                self.cache[barrel_number] = json.load(file)
+            # Open in binary mode because offsets represent byte positions.
+            with open(barrel_path, "rb") as file:
+                file.seek(offset)
+                line = file.readline()
 
-        return self.cache[barrel_number].get(str(term_id), [])
+            if not line:
+                return []
+
+            record = json.loads(line.decode("utf-8"))
+
+            if int(record["term_id"]) != term_id:
+                raise ValueError(
+                    f"Offset mismatch for term ID {term_id}"
+                )
+
+            self.cache[cache_key] = record["postings"]
+
+        return self.cache[cache_key]
 
 
 class GameSearchIndex:
@@ -77,26 +113,17 @@ class GameSearchIndex:
         self.refresh()
 
     def refresh(self):
-        """Reload updated index data after new documents are added."""
+        """Reload index data after dynamic content additions."""
 
-        with open(
-            self.index_dir / "stats.json",
-            encoding="utf-8",
-        ) as file:
+        with open(self.index_dir / "stats.json", encoding="utf-8") as file:
             self.stats = json.load(file)
 
-        with open(
-            self.index_dir / "doc_lengths.json",
-            encoding="utf-8",
-        ) as file:
+        with open(self.index_dir / "doc_lengths.json", encoding="utf-8") as file:
             self.doc_lengths = json.load(file)
 
         self.documents = []
 
-        with open(
-            self.index_dir / "documents.jsonl",
-            encoding="utf-8",
-        ) as file:
+        with open(self.index_dir / "documents.jsonl", encoding="utf-8") as file:
             for line in file:
                 if line.strip():
                     self.documents.append(json.loads(line))
