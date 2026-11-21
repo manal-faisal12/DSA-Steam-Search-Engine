@@ -39,3 +39,16 @@ class ApiTests(unittest.TestCase):
     def test_search_rejects_blank_query(self):
         response = self.client.get("/search", params={"query": ""})
         self.assertEqual(response.status_code, 422)
+
+
+class FullCatalogueSmokeTests(unittest.TestCase):
+    def test_generated_full_catalogue_is_searchable(self):
+        catalogue = Path("index/catalogue/games.jsonl")
+        if not catalogue.exists():
+            self.skipTest("run backend.indexer.parser before the full-catalogue smoke test")
+        client = TestClient(create_app(catalogue))
+        response = client.get("/search", params={"query": "space strategy", "limit": 5})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["engine"], "temporary_catalogue_match")
+        self.assertLessEqual(len(payload["results"]), 5)
