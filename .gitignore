@@ -11,3 +11,8 @@ data/processed/*
 !data/processed/.gitkeep
 index/*
 !index/.gitkeep
+# Generated search index
+data/index/
+
+# Temporary dynamic indexing test data
+data/test/dynamic/
