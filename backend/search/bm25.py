@@ -94,6 +94,38 @@ class BM25:
             return sorted(scores.items(), key=lambda x: (-x[1], x[0]))
         return heapq.nlargest(top_k, scores.items(), key=lambda x: (x[1], -x[0]))
 
+    def search_weighted(
+        self,
+        required_terms: Iterable[str],
+        optional_terms: dict[str, float] | None = None,
+        top_k: int | None = 10,
+        candidate_filter: Callable[[int], bool] | None = None,
+    ) -> list[tuple[int, float]]:
+        """
+        Required terms use AND semantics. Optional terms (e.g. GloVe expansions,
+        weight 0-1) only add a down-weighted bonus to documents that already
+        match every required term; they never add new candidates.
+        """
+        required = list(dict.fromkeys(required_terms))
+        scores = dict(self.search(required, top_k=None, require_all=True,
+                                  candidate_filter=candidate_filter))
+        if not scores:
+            return []
+
+        for term, weight in (optional_terms or {}).items():
+            if term in required:
+                continue
+            plist = self.get_postings(term)
+            if not plist:
+                continue
+            w = idf(self.N, len(plist)) * weight
+            for doc_id, tf in plist:
+                if doc_id in scores:
+                    scores[doc_id] += self.term_score(tf, doc_id, w)
+
+        if top_k is None:
+            return sorted(scores.items(), key=lambda x: (-x[1], x[0]))
+        return heapq.nlargest(top_k, scores.items(), key=lambda x: (x[1], -x[0]))
 
 # ---- corpus stats persistence (file-based, no database) ------------------
 def save_stats(path_prefix: str, doc_lengths: Sequence[int]) -> None:
