@@ -13,7 +13,8 @@ import zipfile
 
 URLS = [
     "https://nlp.stanford.edu/data/glove.6B.zip",
-    "https://downloads.cs.stanford.edu/nlp/data/glove.6B.zip", """Honestly have no clue why we are using stanford data need to check later wth this is"""
+    "https://downloads.cs.stanford.edu/nlp/data/glove.6B.zip", 
+    #Since GloVee was developed in standford 
 ]
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = str(REPO_ROOT / "data" / "glove")

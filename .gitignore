@@ -16,3 +16,6 @@ data/index/
 
 # Temporary dynamic indexing test data
 data/test/dynamic/
+
+# GloVe vectors (~350 MB)
+data/glove/
