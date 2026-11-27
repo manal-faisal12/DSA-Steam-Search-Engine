@@ -18,4 +18,4 @@ data/index/
 data/test/dynamic/
 
 # GloVe vectors (~350 MB)
-data/glove/
+data/glove/frontend/dist/
