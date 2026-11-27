@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PAGE_SIZE, searchGames } from "./api";
 import Filters, { EMPTY_FILTERS, toApiFilters } from "./Filters";
+import AddContent from "./AddContent";
 import SearchBox from "./SearchBox";
 
 function GameCard({ game }) {
@@ -53,6 +54,7 @@ export default function App() {
   const [page, setPage] = useState(1);
   const [submitted, setSubmitted] = useState("");
   const [search, setSearch] = useState({ status: "idle", results: [], total: 0, tookMs: 0, message: "" });
+  const [view, setView] = useState("search");
   const resultsRef = useRef(null);
 
   useEffect(() => {
@@ -94,7 +96,14 @@ export default function App() {
   const loading = search.status === "loading";
   return (
     <>
+      <header className="top-nav">
+        <nav aria-label="Main">
+          <button type="button" className={view === "search" ? "tab current" : "tab"} aria-current={view === "search" ? "page" : undefined} onClick={() => setView("search")}>Search</button>
+          <button type="button" className={view === "add" ? "tab current" : "tab"} aria-current={view === "add" ? "page" : undefined} onClick={() => setView("add")}>Add games</button>
+        </nav>
+      </header>
       <main className="page-shell">
+        {view === "add" ? <AddContent /> : (<>
         <section className="hero" aria-labelledby="page-title">
           <p className="eyebrow">CS-250 · DSA Semester Project</p>
           <h1 id="page-title">Find your next Steam game</h1>
@@ -118,6 +127,7 @@ export default function App() {
           {search.results.map((game) => <GameCard game={game} key={game.id} />)}
           <Pagination page={page} total={search.total} onPage={changePage} />
         </section>
+        </>)}
       </main>
       <Footer />
     </>

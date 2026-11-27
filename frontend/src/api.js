@@ -31,3 +31,25 @@ export async function fetchSuggestions(prefix, signal) {
   const payload = await getJson("/suggest", params, signal, "Suggestions are unavailable.");
   return payload.suggestions;
 }
+
+export async function addGames(games) {
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}/games`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ games }),
+    });
+  } catch {
+    throw new Error("Cannot reach the search server. Please try again shortly.");
+  }
+  if (response.status === 422) throw new Error("Some fields are invalid. Each game needs a title and a description.");
+  if (!response.ok) throw new Error("The game could not be queued for indexing.");
+  return response.json();
+}
+
+export async function getJob(jobId) {
+  const response = await fetch(`${API_BASE_URL}/games/jobs/${encodeURIComponent(jobId)}`);
+  if (!response.ok) throw new Error("Could not check indexing progress.");
+  return response.json();
+}
