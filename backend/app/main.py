@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from .schemas import GameResult, HealthResponse, SearchResponse, SuggestResponse, Suggestion
+from .schemas import (
+    AddGamesRequest,
+    GameResult,
+    HealthResponse,
+    JobStatus,
+    SearchResponse,
+    Suggestion,
+    SuggestResponse,
+)
 from .search_service import IndexSearchService, IndexUnavailableError, SearchFilters
 
 DEFAULT_INDEX_DIR = Path(os.environ.get("STEAM_INDEX_DIR", "data/index"))
@@ -27,7 +36,7 @@ def create_app(index_dir: Path | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=_allowed_origins(),
         allow_credentials=False,
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
     service = IndexSearchService(index_dir or DEFAULT_INDEX_DIR)
@@ -78,6 +87,28 @@ def create_app(index_dir: Path | None = None) -> FastAPI:
             suggestions=[Suggestion(**row) for row in rows],
             took_ms=round((time.perf_counter() - started) * 1000, 3),
         )
+
+    @app.post("/games", response_model=JobStatus, status_code=202)
+    def add_games(request: AddGamesRequest) -> JobStatus:
+        games = []
+        for item in request.games:
+            game = item.model_dump()
+            game["id"] = (game["id"] or f"user-{uuid.uuid4().hex[:10]}").strip()
+            game["short_description"] = game["short_description"] or game["description"][:300]
+            game.update({"categories": [], "developers": [], "publishers": [], "positive": 0, "negative": 0})
+            games.append(game)
+        try:
+            job_id = service.submit_games(games)
+        except IndexUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return JobStatus(**service.job(job_id))
+
+    @app.get("/games/jobs/{job_id}", response_model=JobStatus)
+    def job_status(job_id: str) -> JobStatus:
+        job = service.job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Unknown job id.")
+        return JobStatus(**job)
 
     return app
 

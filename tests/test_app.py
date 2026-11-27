@@ -131,3 +131,56 @@ def test_suggest_is_fast_and_validates_input(client):
 def test_suggest_returns_503_when_index_is_missing(tmp_path):
     response = TestClient(create_app(tmp_path / "missing")).get("/suggest", params={"q": "sp"})
     assert response.status_code == 503
+
+
+def wait_for_job(client, job_id, timeout=20):
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = client.get(f"/games/jobs/{job_id}").json()
+        if job["status"] in ("done", "error"):
+            return job
+        time.sleep(0.05)
+    raise AssertionError("indexing job did not finish")
+
+
+@pytest.fixture
+def writable_client(tmp_path):
+    data = tmp_path / "games.jsonl"
+    data.write_text("\n".join(json.dumps(game) for game in GAMES), encoding="utf-8")
+    index_dir = tmp_path / "index"
+    build_index(data_path=data, index_dir=index_dir)
+    return TestClient(create_app(index_dir))
+
+
+def test_added_game_becomes_searchable_and_suggestible(writable_client):
+    client = writable_client
+    assert client.get("/search", params={"query": "quokka"}).json()["total"] == 0
+    response = client.post("/games", json={"games": [{
+        "title": "Quokka Quest", "description": "Befriend a cheerful quokka on a sunny island.",
+        "genres": ["Adventure"], "price": 4.5, "release_year": 2024,
+    }]})
+    assert response.status_code == 202
+    job = wait_for_job(client, response.json()["job_id"])
+    assert job["status"] == "done" and job["added"] == 1
+    found = client.get("/search", params={"query": "quokka"}).json()
+    assert found["total"] == 1 and found["results"][0]["title"] == "Quokka Quest"
+    assert client.get("/suggest", params={"q": "quok"}).json()["suggestions"][0]["text"] == "Quokka Quest"
+    # the original games are still found, and new content respects filters
+    assert client.get("/search", params={"query": "space"}).json()["total"] == 2
+    assert client.get("/search", params={"query": "quokka", "genre": "Adventure"}).json()["total"] == 1
+
+
+def test_duplicate_id_is_reported_as_job_error(writable_client):
+    client = writable_client
+    body = {"games": [{"id": "dup-1", "title": "Same", "description": "First copy of the game."}]}
+    assert wait_for_job(client, client.post("/games", json=body).json()["job_id"])["status"] == "done"
+    second = wait_for_job(client, client.post("/games", json=body).json()["job_id"])
+    assert second["status"] == "error" and "already exists" in second["error"]
+
+
+def test_add_games_validates_input(writable_client):
+    client = writable_client
+    assert client.post("/games", json={"games": []}).status_code == 422
+    assert client.post("/games", json={"games": [{"title": " ", "description": "x"}]}).status_code == 422
+    assert client.get("/games/jobs/nope").status_code == 404

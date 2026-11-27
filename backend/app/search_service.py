@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from backend.indexer.dynamic_indexer import DynamicIndexer
 from backend.indexer.index_reader import GameSearchIndex
 from backend.search.trie import AutocompleteTrie, build_trie
 from backend.tokenizer.tokenizer import tokenize
@@ -87,6 +91,10 @@ class IndexSearchService:
         self._index: GameSearchIndex | None = None
         self._trie: AutocompleteTrie | None = None
         self._lock = threading.Lock()
+        # One writer thread: new games are added one at a time while searches
+        # keep reading the current index.
+        self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="indexer")
+        self._jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     @property
     def loaded(self) -> bool:
@@ -113,12 +121,53 @@ class IndexSearchService:
         return self._trie
 
     def reload(self) -> None:
-        """Re-read the index files, e.g. after new games were added."""
+        """Load a fresh index and trie, then swap them in.
+
+        The new objects are built first and published with one assignment, so a
+        search running at that moment finishes on the old, complete index.
+        """
+        if self._index is None:
+            return
+        fresh = GameSearchIndex(self.index_dir)
+        fresh_trie = build_trie(doc["game"] for doc in fresh.documents)
         with self._lock:
-            if self._index is None:
-                return
-            self._index.refresh()
-            self._trie = build_trie(doc["game"] for doc in self._index.documents)
+            self._index = fresh
+            self._trie = fresh_trie
+
+    # ---- adding new content -------------------------------------------
+    def submit_games(self, games: list[dict[str, Any]]) -> str:
+        """Queue games for indexing and return a job id to poll."""
+        self.index  # raises IndexUnavailableError if no index exists
+        job_id = uuid.uuid4().hex[:12]
+        self._jobs[job_id] = {
+            "job_id": job_id, "status": "queued", "total": len(games),
+            "added": 0, "error": None, "ids": [str(g["id"]) for g in games],
+        }
+        while len(self._jobs) > 100:
+            self._jobs.popitem(last=False)
+        self._writer.submit(self._run_job, job_id, games)
+        return job_id
+
+    def job(self, job_id: str) -> dict[str, Any] | None:
+        return self._jobs.get(job_id)
+
+    def _run_job(self, job_id: str, games: list[dict[str, Any]]) -> None:
+        job = self._jobs[job_id]
+        job["status"] = "running"
+        try:
+            indexer = DynamicIndexer(self.index_dir)
+            for game in games:
+                indexer.add_game(game)
+                job["added"] += 1
+        except Exception as error:  # reported to the user through the job status
+            job["error"] = str(error)
+        finally:
+            if job["added"]:
+                try:
+                    self.reload()
+                except Exception as error:
+                    job["error"] = job["error"] or f"index reload failed: {error}"
+        job["status"] = "error" if job["error"] else "done"
 
     def suggest(self, prefix: str, limit: int = 5) -> list[dict[str, str]]:
         return self.trie.suggest(prefix, limit)
