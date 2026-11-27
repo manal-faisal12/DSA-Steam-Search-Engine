@@ -103,3 +103,31 @@ def test_pagination_keeps_total_and_slices_results(client):
 def test_cors_allows_configured_origin(client):
     response = client.get("/health", headers={"Origin": "http://localhost:5173"})
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_suggest_returns_ranked_prefix_matches(client):
+    response = client.get("/suggest", params={"q": "spa"})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["prefix"] == "spa"
+    assert {row["text"] for row in payload["suggestions"]} >= {"Space Tactics", "Space Farm"}
+    assert len(payload["suggestions"]) <= 5
+
+
+def test_suggest_includes_tags_and_unknown_prefix_is_empty(client):
+    kinds = {row["kind"] for row in client.get("/suggest", params={"q": "farm"}).json()["suggestions"]}
+    assert "tag" in kinds
+    assert client.get("/suggest", params={"q": "zzzz"}).json()["suggestions"] == []
+
+
+def test_suggest_is_fast_and_validates_input(client):
+    client.get("/suggest", params={"q": "s"})
+    payload = client.get("/suggest", params={"q": "sp"}).json()
+    assert payload["took_ms"] < 100
+    assert client.get("/suggest", params={"q": ""}).status_code == 422
+    assert client.get("/suggest", params={"q": "sp", "limit": 9}).status_code == 422
+
+
+def test_suggest_returns_503_when_index_is_missing(tmp_path):
+    response = TestClient(create_app(tmp_path / "missing")).get("/suggest", params={"q": "sp"})
+    assert response.status_code == 503

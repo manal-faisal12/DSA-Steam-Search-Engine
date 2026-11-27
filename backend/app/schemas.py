@@ -28,3 +28,14 @@ class SearchResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     index_loaded: bool
+
+
+class Suggestion(BaseModel):
+    text: str
+    kind: str
+
+
+class SuggestResponse(BaseModel):
+    prefix: str
+    suggestions: list[Suggestion]
+    took_ms: float = Field(ge=0)

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.indexer.index_reader import GameSearchIndex
+from backend.search.trie import AutocompleteTrie, build_trie
 from backend.tokenizer.tokenizer import tokenize
 
 
@@ -84,6 +85,7 @@ class IndexSearchService:
     def __init__(self, index_dir: Path) -> None:
         self.index_dir = Path(index_dir)
         self._index: GameSearchIndex | None = None
+        self._trie: AutocompleteTrie | None = None
         self._lock = threading.Lock()
 
     @property
@@ -101,7 +103,14 @@ class IndexSearchService:
                             "Run: python -m backend.indexer.index_builder"
                         )
                     self._index = GameSearchIndex(self.index_dir)
+                    self._trie = build_trie(doc["game"] for doc in self._index.documents)
         return self._index
+
+    @property
+    def trie(self) -> AutocompleteTrie:
+        self.index  # makes sure the index (and with it the trie) is loaded
+        assert self._trie is not None
+        return self._trie
 
     def reload(self) -> None:
         """Re-read the index files, e.g. after new games were added."""
@@ -109,6 +118,10 @@ class IndexSearchService:
             if self._index is None:
                 return
             self._index.refresh()
+            self._trie = build_trie(doc["game"] for doc in self._index.documents)
+
+    def suggest(self, prefix: str, limit: int = 5) -> list[dict[str, str]]:
+        return self.trie.suggest(prefix, limit)
 
     def search(
         self,

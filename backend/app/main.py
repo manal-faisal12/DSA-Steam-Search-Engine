@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from .schemas import GameResult, HealthResponse, SearchResponse
+from .schemas import GameResult, HealthResponse, SearchResponse, SuggestResponse, Suggestion
 from .search_service import IndexSearchService, IndexUnavailableError, SearchFilters
 
 DEFAULT_INDEX_DIR = Path(os.environ.get("STEAM_INDEX_DIR", "data/index"))
@@ -60,6 +61,22 @@ def create_app(index_dir: Path | None = None) -> FastAPI:
             limit=limit,
             took_ms=round(page.took_ms, 2),
             engine="bm25_barrels",
+        )
+
+    @app.get("/suggest", response_model=SuggestResponse)
+    def suggest(
+        q: str = Query(min_length=1, max_length=100),
+        limit: int = Query(default=5, ge=1, le=5),
+    ) -> SuggestResponse:
+        started = time.perf_counter()
+        try:
+            rows = service.suggest(q, limit)
+        except IndexUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return SuggestResponse(
+            prefix=q,
+            suggestions=[Suggestion(**row) for row in rows],
+            took_ms=round((time.perf_counter() - started) * 1000, 3),
         )
 
     return app
