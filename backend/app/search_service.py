@@ -1,50 +1,217 @@
-"""Temporary catalogue search used until the BM25 engine is integrated.
+"""Search service that connects the API to the file-based BM25 index.
 
-This module is deliberately small and replaceable.  It lets Talal's API and
-UI work against real full-scale data without claiming to be Manal's ranking
-implementation.
+The service owns no ranking logic.  It tokenizes the query exactly like the
+indexer does, asks the BM25 ranker for matches, applies optional metadata
+filters and slices out one page of results.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import threading
+import time
+import uuid
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from backend.indexer.parser import SearchDocument, iter_documents
-from backend.tokenizer import tokenize
+from backend.indexer.dynamic_indexer import DynamicIndexer
+from backend.indexer.index_reader import GameSearchIndex
+from backend.search.trie import AutocompleteTrie, build_trie
+from backend.tokenizer.tokenizer import tokenize
+
+
+class IndexUnavailableError(RuntimeError):
+    """Raised when the search index has not been built yet."""
 
 
 @dataclass(frozen=True)
-class SearchMatch:
-    document: SearchDocument
-    score: tuple[int, int]
+class SearchFilters:
+    genre: str | None = None
+    min_price: float | None = None
+    max_price: float | None = None
+    year_from: int | None = None
+    year_to: int | None = None
+
+    @property
+    def active(self) -> bool:
+        return any(value is not None for value in (
+            self.genre, self.min_price, self.max_price, self.year_from, self.year_to,
+        ))
+
+    def matches(self, game: dict[str, Any]) -> bool:
+        if self.genre is not None:
+            wanted = self.genre.casefold()
+            labels = [str(label).casefold() for label in _as_list(game.get("genres"))]
+            if wanted not in labels:
+                return False
+        price = _to_float(game.get("price"))
+        if self.min_price is not None and price < self.min_price:
+            return False
+        if self.max_price is not None and price > self.max_price:
+            return False
+        if self.year_from is not None or self.year_to is not None:
+            year = game.get("release_year")
+            if not isinstance(year, int):
+                return False
+            if self.year_from is not None and year < self.year_from:
+                return False
+            if self.year_to is not None and year > self.year_to:
+                return False
+        return True
 
 
-class CatalogueSearchService:
-    def __init__(self, catalogue_path: Path) -> None:
-        self.catalogue_path = catalogue_path
-        self._documents: list[SearchDocument] | None = None
+@dataclass
+class SearchPage:
+    total: int
+    results: list[dict[str, Any]]
+    took_ms: float = 0.0
+    terms: list[str] = field(default_factory=list)
+
+
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    return [value] if value else []
+
+
+def _to_float(value: Any) -> float:
+    try:
+        return max(float(value), 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+class IndexSearchService:
+    """Lazy wrapper around :class:`GameSearchIndex`."""
+
+    def __init__(self, index_dir: Path) -> None:
+        self.index_dir = Path(index_dir)
+        self._index: GameSearchIndex | None = None
+        self._trie: AutocompleteTrie | None = None
+        self._lock = threading.Lock()
+        # One writer thread: new games are added one at a time while searches
+        # keep reading the current index.
+        self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="indexer")
+        self._jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
     @property
     def loaded(self) -> bool:
-        return self._documents is not None
+        return self._index is not None
 
-    def _load(self) -> list[SearchDocument]:
-        if self._documents is None:
-            self._documents = list(iter_documents(self.catalogue_path)) if self.catalogue_path.exists() else []
-        return self._documents
+    @property
+    def index(self) -> GameSearchIndex:
+        if self._index is None:
+            with self._lock:
+                if self._index is None:
+                    if not (self.index_dir / "stats.json").exists():
+                        raise IndexUnavailableError(
+                            f"No search index found in {self.index_dir}. "
+                            "Run: python -m backend.indexer.index_builder"
+                        )
+                    self._index = GameSearchIndex(self.index_dir)
+                    self._trie = build_trie(doc["game"] for doc in self._index.documents)
+        return self._index
 
-    def search(self, query: str, limit: int = 10) -> list[SearchDocument]:
-        terms = tokenize(query)
+    @property
+    def trie(self) -> AutocompleteTrie:
+        self.index  # makes sure the index (and with it the trie) is loaded
+        assert self._trie is not None
+        return self._trie
+
+    def reload(self) -> None:
+        """Load a fresh index and trie, then swap them in.
+
+        The new objects are built first and published with one assignment, so a
+        search running at that moment finishes on the old, complete index.
+        """
+        if self._index is None:
+            return
+        fresh = GameSearchIndex(self.index_dir)
+        fresh_trie = build_trie(doc["game"] for doc in fresh.documents)
+        with self._lock:
+            self._index = fresh
+            self._trie = fresh_trie
+
+    # ---- adding new content -------------------------------------------
+    def submit_games(self, games: list[dict[str, Any]]) -> str:
+        """Queue games for indexing and return a job id to poll."""
+        self.index  # raises IndexUnavailableError if no index exists
+        job_id = uuid.uuid4().hex[:12]
+        self._jobs[job_id] = {
+            "job_id": job_id, "status": "queued", "total": len(games),
+            "added": 0, "error": None, "ids": [str(g["id"]) for g in games],
+        }
+        while len(self._jobs) > 100:
+            self._jobs.popitem(last=False)
+        self._writer.submit(self._run_job, job_id, games)
+        return job_id
+
+    def job(self, job_id: str) -> dict[str, Any] | None:
+        return self._jobs.get(job_id)
+
+    def _run_job(self, job_id: str, games: list[dict[str, Any]]) -> None:
+        job = self._jobs[job_id]
+        job["status"] = "running"
+        try:
+            indexer = DynamicIndexer(self.index_dir)
+            for game in games:
+                indexer.add_game(game)
+                job["added"] += 1
+        except Exception as error:  # reported to the user through the job status
+            job["error"] = str(error)
+        finally:
+            if job["added"]:
+                try:
+                    self.reload()
+                except Exception as error:
+                    job["error"] = job["error"] or f"index reload failed: {error}"
+        job["status"] = "error" if job["error"] else "done"
+
+    def suggest(self, prefix: str, limit: int = 5) -> list[dict[str, str]]:
+        return self.trie.suggest(prefix, limit)
+
+    def search(
+        self,
+        query: str,
+        limit: int = 10,
+        offset: int = 0,
+        filters: SearchFilters | None = None,
+    ) -> SearchPage:
+        started = time.perf_counter()
+        index = self.index
+        terms = tokenize(query, remove_stopwords=True)
         if not terms:
-            return []
-        matches: list[SearchMatch] = []
-        for document in self._load():
-            title = document.title.lower()
-            text = f"{title} {document.short_description.lower()}"
-            title_hits = sum(term in title for term in terms)
-            text_hits = sum(term in text for term in terms)
-            if text_hits:
-                matches.append(SearchMatch(document, (title_hits, text_hits)))
-        matches.sort(key=lambda match: (match.score, match.document.popularity), reverse=True)
-        return [match.document for match in matches[:limit]]
+            return SearchPage(total=0, results=[], terms=[])
+
+        documents = index.documents
+        candidate_filter = None
+        if filters is not None and filters.active:
+            def candidate_filter(doc_id: int) -> bool:
+                return 0 <= doc_id < len(documents) and filters.matches(documents[doc_id]["game"])
+
+        ranked = index.ranker.search(
+            terms, top_k=None, require_all=True, candidate_filter=candidate_filter,
+        )
+        page = ranked[offset:offset + limit]
+        results = [
+            _to_result(documents[doc_id]["game"], score)
+            for doc_id, score in page
+            if 0 <= doc_id < len(documents)
+        ]
+        took = (time.perf_counter() - started) * 1000
+        return SearchPage(total=len(ranked), results=results, took_ms=took, terms=terms)
+
+
+def _to_result(game: dict[str, Any], score: float) -> dict[str, Any]:
+    year = game.get("release_year")
+    return {
+        "id": str(game.get("id")),
+        "title": str(game.get("title", "")),
+        "short_description": str(game.get("short_description") or game.get("description") or ""),
+        "release_year": year if isinstance(year, int) else None,
+        "price": _to_float(game.get("price")),
+        "genres": [str(label) for label in _as_list(game.get("genres"))],
+        "score": round(float(score), 4),
+    }

@@ -1,5 +1,8 @@
-import { useState } from "react";
-import { searchGames } from "./api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { PAGE_SIZE, searchGames } from "./api";
+import Filters, { EMPTY_FILTERS, toApiFilters } from "./Filters";
+import AddContent from "./AddContent";
+import SearchBox from "./SearchBox";
 
 function GameCard({ game }) {
   const metadata = [
@@ -17,54 +20,116 @@ function GameCard({ game }) {
   );
 }
 
+function Pagination({ page, total, onPage }) {
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  if (pages <= 1) return null;
+  return (
+    <nav className="pagination" aria-label="Result pages">
+      <button type="button" className="secondary" disabled={page <= 1} onClick={() => onPage(page - 1)}>Previous</button>
+      <span>Page {page} of {pages}</span>
+      <button type="button" className="secondary" disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</button>
+    </nav>
+  );
+}
+
+function Footer() {
+  return (
+    <footer className="site-footer">
+      <p>
+        Game data from the{" "}
+        <a href="https://huggingface.co/datasets/FronkonGames/steam-games-dataset">Fronkon Games Steam Games Dataset</a>,
+        licensed under{" "}
+        <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.
+        Collected from the <a href="https://store.steampowered.com/">Steam Store API</a> and{" "}
+        <a href="https://steamspy.com/">SteamSpy</a>.
+      </p>
+      <p>CS-250 Data Structures &amp; Algorithms · NUST SEECS · BESE-2025. Not affiliated with Valve or Steam.</p>
+    </footer>
+  );
+}
+
 export default function App() {
   const [query, setQuery] = useState("");
-  const [search, setSearch] = useState({ status: "idle", results: [], message: "" });
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const [page, setPage] = useState(1);
+  const [submitted, setSubmitted] = useState("");
+  const [search, setSearch] = useState({ status: "idle", results: [], total: 0, tookMs: 0, message: "" });
+  const [view, setView] = useState("search");
+  const resultsRef = useRef(null);
 
-  async function handleSubmit(event) {
-    event.preventDefault();
-    const submittedQuery = query.trim();
-    if (!submittedQuery) {
-      setSearch({ status: "error", results: [], message: "Enter a game, genre, or keyword to search." });
+  useEffect(() => {
+    if (!submitted) return undefined;
+    const controller = new AbortController();
+    setSearch((current) => ({ ...current, status: "loading", message: "" }));
+    searchGames(submitted, { filters: toApiFilters(filters), page, signal: controller.signal })
+      .then((payload) => setSearch({
+        status: "success", results: payload.results, total: payload.total, tookMs: payload.took_ms, message: "",
+      }))
+      .catch((error) => {
+        if (error.name === "AbortError") return;
+        setSearch({ status: "error", results: [], total: 0, tookMs: 0, message: error.message });
+      });
+    return () => controller.abort();
+  }, [submitted, filters, page]);
+
+  const handleSubmit = useCallback((text) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      setSubmitted("");
+      setSearch({ status: "error", results: [], total: 0, tookMs: 0, message: "Enter a game, genre, or keyword to search." });
       return;
     }
-    setSearch({ status: "loading", results: [], message: "" });
-    try {
-      const payload = await searchGames(submittedQuery);
-      setSearch({ status: "success", results: payload.results, message: "" });
-    } catch (error) {
-      setSearch({ status: "error", results: [], message: error.message });
-    }
+    setPage(1);
+    setSubmitted(trimmed);
+  }, []);
+
+  function changePage(next) {
+    setPage(next);
+    resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  return (
-    <main className="page-shell">
-      <section className="hero" aria-labelledby="page-title">
-        <p className="eyebrow">CS-250 · DSA Semester Project</p>
-        <h1 id="page-title">Find your next Steam game</h1>
-        <p>Search the project’s cleaned Steam catalogue by title or keywords.</p>
-        <form className="search-form" onSubmit={handleSubmit} role="search">
-          <label className="sr-only" htmlFor="search-input">Search Steam games</label>
-          <input
-            id="search-input"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Try: space strategy"
-            autoComplete="off"
-          />
-          <button type="submit" disabled={search.status === "loading"}>
-            {search.status === "loading" ? "Searching…" : "Search"}
-          </button>
-        </form>
-      </section>
+  function changeFilters(next) {
+    setFilters(next);
+    setPage(1);
+  }
 
-      <section className="results" aria-live="polite" aria-busy={search.status === "loading"}>
-        {search.status === "idle" && <p className="hint">Results will appear here after you search.</p>}
-        {search.status === "loading" && <p>Searching the catalogue…</p>}
-        {search.status === "error" && <p className="error" role="alert">{search.message}</p>}
-        {search.status === "success" && search.results.length === 0 && <p>No games matched that search.</p>}
-        {search.status === "success" && search.results.map((game) => <GameCard game={game} key={game.id} />)}
-      </section>
-    </main>
+  const loading = search.status === "loading";
+  return (
+    <>
+      <header className="top-nav">
+        <nav aria-label="Main">
+          <button type="button" className={view === "search" ? "tab current" : "tab"} aria-current={view === "search" ? "page" : undefined} onClick={() => setView("search")}>Search</button>
+          <button type="button" className={view === "add" ? "tab current" : "tab"} aria-current={view === "add" ? "page" : undefined} onClick={() => setView("add")}>Add games</button>
+        </nav>
+      </header>
+      <main className="page-shell">
+        {view === "add" ? <AddContent /> : (<>
+        <section className="hero" aria-labelledby="page-title">
+          <p className="eyebrow">CS-250 · DSA Semester Project</p>
+          <h1 id="page-title">Find your next Steam game</h1>
+          <p>Search tens of thousands of Steam games by title, description, genre or tag.</p>
+          <SearchBox value={query} onChange={setQuery} onSubmit={handleSubmit} busy={loading} />
+          <Filters filters={filters} onChange={changeFilters} />
+        </section>
+
+        <section className="results" ref={resultsRef} aria-live="polite" aria-busy={loading}>
+          {search.status === "idle" && <p className="hint">Results will appear here after you search.</p>}
+          {loading && search.results.length === 0 && <p>Searching the catalogue…</p>}
+          {search.status === "error" && <p className="error" role="alert">{search.message}</p>}
+          {search.status === "success" && search.total === 0 && (
+            <p>No games matched “{submitted}”. Try fewer words or clear the filters.</p>
+          )}
+          {search.status === "success" && search.total > 0 && (
+            <p className="summary">
+              {search.total.toLocaleString()} result{search.total === 1 ? "" : "s"} in {Math.round(search.tookMs)} ms
+            </p>
+          )}
+          {search.results.map((game) => <GameCard game={game} key={game.id} />)}
+          <Pagination page={page} total={search.total} onPage={changePage} />
+        </section>
+        </>)}
+      </main>
+      <Footer />
+    </>
   );
 }
