@@ -1,6 +1,7 @@
 """Shared tokenizer. Use the SAME function when building the index and when parsing queries."""
 import re
 import unicodedata
+from collections.abc import Iterable
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -18,6 +19,13 @@ def _fold_accents(text: str) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c))
 
 
+def normalize_text(value) -> str:
+    """Lowercase, fold accents and collapse whitespace."""
+    if value is None:
+        return ""
+    return " ".join(_fold_accents(str(value).lower()).split())
+
+
 def tokenize(text: str, remove_stopwords: bool = False) -> list[str]:
     """
     Lowercase, fold accents, split on non-alphanumerics.
@@ -28,3 +36,15 @@ def tokenize(text: str, remove_stopwords: bool = False) -> list[str]:
     if remove_stopwords:
         tokens = [t for t in tokens if t not in STOPWORDS and (len(t) > 1 or t.isdigit())]
     return tokens
+
+
+def unique_tokens(values: Iterable, remove_stopwords: bool = True) -> list[str]:
+    """Tokenize several values and keep each token once, in first-seen order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        for token in tokenize(str(value or ""), remove_stopwords=remove_stopwords):
+            if token not in seen:
+                seen.add(token)
+                result.append(token)
+    return result
