@@ -159,7 +159,7 @@ class DynamicIndexer:
                     f"Game ID {game['id']} already exists."
                 )
 
-        doc_id = stats["num_docs"]
+        doc_id = len(documents)
 
         words = tokenize(
             get_searchable_text(game),
@@ -215,14 +215,7 @@ class DynamicIndexer:
 
             postings.append([doc_id, frequency])
 
-        # Write updated barrels and regenerate their offset tables.
-        for barrel_number, term_postings in updated_barrels.items():
-            write_barrel(
-                self.barrel_dir,
-                barrel_number,
-                term_postings,
-            )
-
+        
         forward_records.append({
             "doc_id": doc_id,
             "terms": forward_terms,
@@ -247,13 +240,21 @@ class DynamicIndexer:
         )
 
         # Save updated collection data.
-        atomic_write_json(lexicon_path, lexicon)
-
         atomic_write_jsonl(documents_path, documents)
-
+        
         atomic_write_jsonl(forward_path, forward_records)
 
         atomic_write_json(lengths_path, document_lengths)
+        
+        atomic_write_json(lexicon_path, lexicon)
+
+        # Write updated barrels and regenerate their offset tables.
+        for barrel_number, term_postings in updated_barrels.items():
+            write_barrel(
+                            self.barrel_dir,
+                            barrel_number,
+                            term_postings,
+                        )
 
         atomic_write_json(stats_path, stats)
 

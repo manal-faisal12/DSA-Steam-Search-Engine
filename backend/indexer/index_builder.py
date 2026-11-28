@@ -10,7 +10,7 @@ Creates:
 5. Offset tables: term ID -> byte position in barrel
 6. Document storage and statistics
 """
-
+import os
 import argparse
 import json
 from collections import defaultdict
@@ -67,15 +67,21 @@ def write_barrel(barrel_dir, barrel_number, term_postings):
     Each line contains one term ID and its postings.
     Offsets are measured in bytes, not characters.
     """
+    
     barrel_dir = Path(barrel_dir)
     barrel_dir.mkdir(parents=True, exist_ok=True)
 
     barrel_path = barrel_dir / f"barrel_{barrel_number}.jsonl"
     offset_path = barrel_dir / f"offsets_{barrel_number}.json"
+    
+    barrel_tmp = barrel_path.with_name(barrel_path.name + ".tmp")
+    offset_tmp = offset_path.with_name(offset_path.name + ".tmp")
+    #added temporary barrels path so write to temp instead of path
+
 
     offsets = {}
 
-    with open(barrel_path, "wb") as file:
+    with open(barrel_tmp, "wb") as file:
         for term_id in sorted(term_postings, key=int):
             offsets[str(term_id)] = file.tell()
 
@@ -94,9 +100,13 @@ def write_barrel(barrel_dir, barrel_number, term_postings):
 
             file.write(line)
 
-    with open(offset_path, "w", encoding="utf-8") as file:
+    with open(offset_tmp, "w", encoding="utf-8") as file:
         json.dump(offsets, file, indent=4)
 
+    os.replace(barrel_tmp, barrel_path)
+    os.replace(offset_tmp, offset_path)
+
+    
 def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
     """Build all index files from a JSONL dataset."""
 
