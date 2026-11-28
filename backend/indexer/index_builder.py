@@ -97,7 +97,6 @@ def write_barrel(barrel_dir, barrel_number, term_postings):
     with open(offset_path, "w", encoding="utf-8") as file:
         json.dump(offsets, file, indent=4)
 
-
 def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
     """Build all index files from a JSONL dataset."""
 
@@ -113,79 +112,67 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
     barrel_dir.mkdir(parents=True, exist_ok=True)
 
     # Remove old barrel and offset files.
-    for pattern in [
-        "barrel_*.json",
-        "barrel_*.jsonl",
-        "offsets_*.json",
-    ]:
+    for pattern in ["barrel_*.json", "barrel_*.jsonl", "offsets_*.json"]:
         for old_file in barrel_dir.glob(pattern):
             old_file.unlink()
 
     lexicon = {}
     inverted = defaultdict(list)
-    forward_records = []
-    documents = []
     document_lengths = []
 
     next_term_id = 1
 
     print(f"Reading dataset: {data_path}")
 
-    for doc_id, game in enumerate(read_jsonl(data_path)):
-        searchable_text = get_searchable_text(game)
-        words = tokenize(searchable_text, remove_stopwords=True)
+    # Documents and the forward index are streamed to disk one record at a
+    # time, so memory only holds the lexicon and the inverted index.
+    with open(index_dir / "documents.jsonl", "w", encoding="utf-8") as docs_file, \
+         open(index_dir / "forward_index.jsonl", "w", encoding="utf-8") as forward_file:
 
-        term_data = defaultdict(list)
+        for doc_id, game in enumerate(read_jsonl(data_path)):
+            searchable_text = get_searchable_text(game)
+            words = tokenize(searchable_text, remove_stopwords=True)
 
-        for position, word in enumerate(words):
-            if word not in lexicon:
-                lexicon[word] = next_term_id
-                next_term_id += 1
+            term_data = defaultdict(list)
 
-            term_data[word].append(position)
+            for position, word in enumerate(words):
+                if word not in lexicon:
+                    lexicon[word] = next_term_id
+                    next_term_id += 1
 
-        forward_terms = []
+                term_data[word].append(position)
 
-        for word, positions in term_data.items():
-            term_id = lexicon[word]
-            frequency = len(positions)
+            forward_terms = []
 
-            forward_terms.append({
-                "term_id": term_id,
-                "frequency": frequency,
-                "positions": positions,
-            })
+            for word, positions in term_data.items():
+                term_id = lexicon[word]
+                frequency = len(positions)
 
-            inverted[word].append([doc_id, frequency])
+                forward_terms.append({
+                    "term_id": term_id,
+                    "frequency": frequency,
+                    "positions": positions,
+                })
 
-        forward_records.append({
-            "doc_id": doc_id,
-            "terms": forward_terms,
-        })
+                inverted[word].append([doc_id, frequency])
 
-        documents.append({
-            "doc_id": doc_id,
-            "game": game,
-        })
+            forward_file.write(
+                json.dumps({"doc_id": doc_id, "terms": forward_terms}) + "\n"
+            )
+            docs_file.write(
+                json.dumps({"doc_id": doc_id, "game": game}, ensure_ascii=False) + "\n"
+            )
 
-        document_lengths.append(len(words))
+            document_lengths.append(len(words))
 
-        if (doc_id + 1) % 100 == 0:
-            print(f"Indexed {doc_id + 1} games...")
+            if (doc_id + 1) % 100 == 0:
+                print(f"Indexed {doc_id + 1} games...")
+
+    num_docs = len(document_lengths)
 
     # Save lexicon.
     with open(index_dir / "lexicon.json", "w", encoding="utf-8") as file:
         json.dump(lexicon, file, ensure_ascii=False)
-
-    # Save original game records.
-    with open(index_dir / "documents.jsonl", "w", encoding="utf-8") as file:
-        for record in documents:
-            file.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    # Save forward index.
-    with open(index_dir / "forward_index.jsonl", "w", encoding="utf-8") as file:
-        for record in forward_records:
-            file.write(json.dumps(record) + "\n")
 
     # Group inverted-index terms into barrels.
     barrels = defaultdict(dict)
@@ -193,7 +180,6 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
     for word, postings in inverted.items():
         term_id = lexicon[word]
         barrel_number = (term_id - 1) // TERMS_PER_BARREL
-
         barrels[barrel_number][str(term_id)] = postings
 
     # Write each barrel and its offset table.
@@ -201,12 +187,11 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
         write_barrel(barrel_dir, barrel_number, term_postings)
 
     average_length = (
-        sum(document_lengths) / len(document_lengths)
-        if document_lengths else 0
+        sum(document_lengths) / num_docs if num_docs else 0
     )
 
     stats = {
-        "num_docs": len(documents),
+        "num_docs": num_docs,
         "num_terms": len(lexicon),
         "avg_doc_len": average_length,
         "terms_per_barrel": TERMS_PER_BARREL,
@@ -239,10 +224,15 @@ def main():
         default=DEFAULT_DATA,
         help="Path to the input JSONL dataset.",
     )
+    parser.add_argument(
+        "--index-dir",
+        type=Path,
+        default=INDEX_DIR,
+        help="Where to write the index files.",
+    )
 
     args = parser.parse_args()
-    build_index(args.data)
-
+    build_index(args.data, args.index_dir)
 
 if __name__ == "__main__":
     main()
