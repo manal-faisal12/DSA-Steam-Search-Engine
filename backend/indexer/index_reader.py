@@ -109,7 +109,7 @@ class GameSearchIndex:
 
     def __init__(self, index_dir=INDEX_DIR):
         self.index_dir = Path(index_dir)
-        self.barrels = BarrelStore(self.index_dir)
+        self.barrels = None
         self.refresh()
 
     def refresh(self):
@@ -128,8 +128,11 @@ class GameSearchIndex:
                 if line.strip():
                     self.documents.append(json.loads(line))
 
-        self.barrels.refresh()
-
+        if self.barrels is None:
+            self.barrels = BarrelStore(self.index_dir)
+        else:
+            self.barrels.refresh()
+            
         self.ranker = BM25(
             num_docs=self.stats["num_docs"],
             avg_doc_len=self.stats["avg_doc_len"],
