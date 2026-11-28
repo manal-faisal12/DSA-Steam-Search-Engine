@@ -1,0 +1,9 @@
+.git
+frontend
+tests
+data/raw
+data/processed
+data/index
+data/glove
+**/__pycache__
+**/node_modules
