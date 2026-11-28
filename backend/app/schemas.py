@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class GameResult(BaseModel):
@@ -12,6 +12,11 @@ class GameResult(BaseModel):
     release_year: int | None
     price: float
     genres: list[str]
+
+    @field_validator("price", mode="before")
+    @classmethod
+    def default_missing_price(cls, value):
+        return 0.0 if value is None else value
 
 
 class SearchResponse(BaseModel):

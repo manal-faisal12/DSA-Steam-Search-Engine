@@ -6,9 +6,9 @@ keeping memory use bounded for the 80,000-game dataset.
 """
 
 from __future__ import annotations
-
 import argparse
 import json
+import math
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -59,8 +59,16 @@ def parse_record(record: dict[str, Any]) -> SearchDocument:
         price = float(price)
     except (TypeError, ValueError):
         price = 0.0
+    if not math.isfinite(price):
+        price = 0.0
 
     tags = _as_string_list(record.get("tags"))
+
+    if "popularity" in record:
+        popularity = int(record["popularity"] or 0)
+    else:
+        popularity = int(record.get("positive", 0) or 0) + int(record.get("negative", 0) or 0)
+        
     return SearchDocument(
         id=game_id,
         title=title,
@@ -71,7 +79,7 @@ def parse_record(record: dict[str, Any]) -> SearchDocument:
         genres=_as_string_list(record.get("genres")),
         tags=tags,
         categories=_as_string_list(record.get("categories")),
-        popularity=int(record.get("positive", 0) or 0) + int(record.get("negative", 0) or 0),
+        popularity=popularity,
         title_tokens=unique_tokens([title]),
         tag_tokens=unique_tokens(tags),
     )
