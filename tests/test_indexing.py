@@ -1,4 +1,4 @@
-﻿import json
+import json
 
 from backend.indexer.index_reader import GameSearchIndex
 
