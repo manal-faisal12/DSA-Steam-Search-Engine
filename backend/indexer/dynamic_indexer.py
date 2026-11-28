@@ -1,9 +1,10 @@
-
 """
 Dynamic Indexer for Steam Game Search Engine.
 
 Adds new games to an existing file-based index.
-Updates JSONL barrel files and their byte-offset tables.
+Appends to the document and forward-index files, updates the byte-offset
+table, and rewrites only the barrels that contain the new game's terms.
+stats.json is written last and acts as the commit point.
 """
 
 import json
@@ -37,32 +38,6 @@ def atomic_write_json(path, data):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=2)
-
-        os.replace(temp_name, path)
-
-    except Exception:
-        if os.path.exists(temp_name):
-            os.remove(temp_name)
-        raise
-
-
-def atomic_write_jsonl(path, records):
-    """Rewrite a JSONL file safely using a temporary file."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    fd, temp_name = tempfile.mkstemp(
-        dir=str(path.parent),
-        suffix=".tmp",
-        text=True,
-    )
-
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            for record in records:
-                file.write(
-                    json.dumps(record, ensure_ascii=False) + "\n"
-                )
 
         os.replace(temp_name, path)
 
@@ -126,6 +101,7 @@ class DynamicIndexer:
         documents_path = self.index_dir / "documents.jsonl"
         forward_path = self.index_dir / "forward_index.jsonl"
         lengths_path = self.index_dir / "doc_lengths.json"
+        offsets_path = self.index_dir / "doc_offsets.json"
 
         with open(lexicon_path, encoding="utf-8") as file:
             lexicon = json.load(file)
@@ -133,33 +109,36 @@ class DynamicIndexer:
         with open(stats_path, encoding="utf-8") as file:
             stats = json.load(file)
 
-        with open(documents_path, encoding="utf-8") as file:
-            documents = [
-                json.loads(line)
-                for line in file
-                if line.strip()
-            ]
-
-        with open(forward_path, encoding="utf-8") as file:
-            forward_records = [
-                json.loads(line)
-                for line in file
-                if line.strip()
-            ]
-
         with open(lengths_path, encoding="utf-8") as file:
             document_lengths = json.load(file)
 
-        # Reject duplicate external game IDs.
-        for record in documents:
-            existing_game = record.get("game", {})
+        with open(offsets_path, encoding="utf-8") as file:
+            doc_offsets = json.load(file)
 
-            if str(existing_game.get("id")) == str(game["id"]):
-                raise ValueError(
-                    f"Game ID {game['id']} already exists."
-                )
+        # Stream through documents.jsonl once: reject duplicate external IDs
+        # and count the existing documents (the count is the new doc_id).
+        doc_id = 0
 
-        doc_id = len(documents)
+        with open(documents_path, encoding="utf-8") as file:
+            for line in file:
+                if not line.strip():
+                    continue
+
+                existing_game = json.loads(line).get("game", {})
+
+                if str(existing_game.get("id")) == str(game["id"]):
+                    raise ValueError(
+                        f"Game ID {game['id']} already exists."
+                    )
+
+                doc_id += 1
+
+        # A previous crash can leave extra lines in documents.jsonl.
+        if doc_id != len(document_lengths) or doc_id != len(doc_offsets):
+            raise RuntimeError(
+                "Index files are inconsistent (possible interrupted add). "
+                "Rebuild the index."
+            )
 
         words = tokenize(
             get_searchable_text(game),
@@ -186,7 +165,7 @@ class DynamicIndexer:
         forward_terms = []
 
         # Group updates by barrel so each barrel is rewritten once.
-        updated_barrels = defaultdict(dict)
+        updated_barrels = {}
 
         for word, positions in term_positions.items():
             term_id = int(lexicon[word])
@@ -207,54 +186,60 @@ class DynamicIndexer:
                     barrel_number
                 )
 
-            term_key = str(term_id)
-
             postings = updated_barrels[barrel_number].setdefault(
-                term_key, []
+                str(term_id), []
             )
 
             postings.append([doc_id, frequency])
 
-        
-        forward_records.append({
-            "doc_id": doc_id,
-            "terms": forward_terms,
-        })
-
-        documents.append({
-            "doc_id": doc_id,
-            "game": game,
-        })
-
         document_lengths.append(len(words))
 
-        stats["num_docs"] = len(documents)
+        stats["num_docs"] = doc_id + 1
         stats["num_terms"] = len(lexicon)
-
         stats["avg_doc_len"] = (
             sum(document_lengths) / len(document_lengths)
         )
-
-        stats["num_barrels"] = len(
-            list(self.barrel_dir.glob("barrel_*.jsonl"))
+        stats["num_barrels"] = max(
+            len(list(self.barrel_dir.glob("barrel_*.jsonl"))),
+            (max(updated_barrels) + 1) if updated_barrels else 0,
         )
 
-        # Save updated collection data.
-        atomic_write_jsonl(documents_path, documents)
-        
-        atomic_write_jsonl(forward_path, forward_records)
+        # ---- Save everything. stats.json goes LAST (commit point). ----
 
+        # The new document starts at the current end of documents.jsonl.
+        doc_offsets.append(documents_path.stat().st_size)
+
+        # Binary append with manual encoding keeps byte offsets exact
+        # (text mode would write "\r\n" on Windows).
+        with open(documents_path, "ab") as file:
+            file.write(
+                (
+                    json.dumps(
+                        {"doc_id": doc_id, "game": game},
+                        ensure_ascii=False,
+                    ) + "\n"
+                ).encode("utf-8")
+            )
+
+        with open(forward_path, "ab") as file:
+            file.write(
+                (
+                    json.dumps(
+                        {"doc_id": doc_id, "terms": forward_terms}
+                    ) + "\n"
+                ).encode("utf-8")
+            )
+
+        atomic_write_json(offsets_path, doc_offsets)
         atomic_write_json(lengths_path, document_lengths)
-        
         atomic_write_json(lexicon_path, lexicon)
 
-        # Write updated barrels and regenerate their offset tables.
         for barrel_number, term_postings in updated_barrels.items():
             write_barrel(
-                            self.barrel_dir,
-                            barrel_number,
-                            term_postings,
-                        )
+                self.barrel_dir,
+                barrel_number,
+                term_postings,
+            )
 
         atomic_write_json(stats_path, stats)
 

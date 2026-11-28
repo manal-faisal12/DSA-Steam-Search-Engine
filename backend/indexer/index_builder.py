@@ -1,4 +1,3 @@
-
 """
 Steam Game Search Engine - Index Builder
 
@@ -8,7 +7,7 @@ Creates:
 3. Inverted index: term -> documents and frequencies
 4. Barrels: JSONL files containing term postings
 5. Offset tables: term ID -> byte position in barrel
-6. Document storage and statistics
+6. Document storage, document byte offsets and statistics
 """
 import os
 import argparse
@@ -66,18 +65,17 @@ def write_barrel(barrel_dir, barrel_number, term_postings):
 
     Each line contains one term ID and its postings.
     Offsets are measured in bytes, not characters.
+    Files are written to .tmp first and then swapped in atomically.
     """
-    
+
     barrel_dir = Path(barrel_dir)
     barrel_dir.mkdir(parents=True, exist_ok=True)
 
     barrel_path = barrel_dir / f"barrel_{barrel_number}.jsonl"
     offset_path = barrel_dir / f"offsets_{barrel_number}.json"
-    
+
     barrel_tmp = barrel_path.with_name(barrel_path.name + ".tmp")
     offset_tmp = offset_path.with_name(offset_path.name + ".tmp")
-    #added temporary barrels path so write to temp instead of path
-
 
     offsets = {}
 
@@ -106,7 +104,7 @@ def write_barrel(barrel_dir, barrel_number, term_postings):
     os.replace(barrel_tmp, barrel_path)
     os.replace(offset_tmp, offset_path)
 
-    
+
 def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
     """Build all index files from a JSONL dataset."""
 
@@ -129,6 +127,7 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
     lexicon = {}
     inverted = defaultdict(list)
     document_lengths = []
+    doc_offsets = []  # byte position of each document line in documents.jsonl
 
     next_term_id = 1
 
@@ -136,7 +135,9 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
 
     # Documents and the forward index are streamed to disk one record at a
     # time, so memory only holds the lexicon and the inverted index.
-    with open(index_dir / "documents.jsonl", "w", encoding="utf-8") as docs_file, \
+    # documents.jsonl is opened in BINARY mode so tell() gives real byte
+    # offsets and "\n" is never converted to "\r\n" on Windows.
+    with open(index_dir / "documents.jsonl", "wb") as docs_file, \
          open(index_dir / "forward_index.jsonl", "w", encoding="utf-8") as forward_file:
 
         for doc_id, game in enumerate(read_jsonl(data_path)):
@@ -169,8 +170,15 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
             forward_file.write(
                 json.dumps({"doc_id": doc_id, "terms": forward_terms}) + "\n"
             )
+
+            doc_offsets.append(docs_file.tell())
             docs_file.write(
-                json.dumps({"doc_id": doc_id, "game": game}, ensure_ascii=False) + "\n"
+                (
+                    json.dumps(
+                        {"doc_id": doc_id, "game": game},
+                        ensure_ascii=False,
+                    ) + "\n"
+                ).encode("utf-8")
             )
 
             document_lengths.append(len(words))
@@ -179,6 +187,10 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
                 print(f"Indexed {doc_id + 1} games...")
 
     num_docs = len(document_lengths)
+
+    # Save document byte offsets.
+    with open(index_dir / "doc_offsets.json", "w", encoding="utf-8") as file:
+        json.dump(doc_offsets, file)
 
     # Save lexicon.
     with open(index_dir / "lexicon.json", "w", encoding="utf-8") as file:
@@ -208,11 +220,12 @@ def build_index(data_path=DEFAULT_DATA, index_dir=INDEX_DIR):
         "num_barrels": len(barrels),
     }
 
-    with open(index_dir / "stats.json", "w", encoding="utf-8") as file:
-        json.dump(stats, file, indent=4)
-
     with open(index_dir / "doc_lengths.json", "w", encoding="utf-8") as file:
         json.dump(document_lengths, file)
+
+    # stats.json is written last: it is the "commit" marker of a finished build.
+    with open(index_dir / "stats.json", "w", encoding="utf-8") as file:
+        json.dump(stats, file, indent=4)
 
     print("\nINDEX BUILD COMPLETE")
     print("--------------------")
@@ -243,6 +256,7 @@ def main():
 
     args = parser.parse_args()
     build_index(args.data, args.index_dir)
+
 
 if __name__ == "__main__":
     main()
