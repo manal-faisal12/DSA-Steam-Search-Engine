@@ -35,7 +35,7 @@ class CatalogueSearchService:
         return self._documents
 
     def search(self, query: str, limit: int = 10) -> list[SearchDocument]:
-        terms = tokenize(query)
+        terms = tokenize(query, remove_stopwords=True) 
         if not terms:
             return []
         matches: list[SearchMatch] = []
