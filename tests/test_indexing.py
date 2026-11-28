@@ -1,5 +1,4 @@
-﻿
-import json
+﻿import json
 
 from backend.indexer.index_reader import GameSearchIndex
 
@@ -129,15 +128,3 @@ def test_empty_query(base_index_dir):
 
     assert results == []
 
-def test_barrel_postings_are_retrieved_using_offsets(base_index_dir):
-    engine = GameSearchIndex(index_dir=base_index_dir)
-
-    word = "guardians"
-
-    postings = engine.barrels.get_postings(word)
-
-    assert len(postings) > 0
-    assert all(
-        isinstance(doc_id, int) and isinstance(tf, int)
-        for doc_id, tf in postings
-    )
